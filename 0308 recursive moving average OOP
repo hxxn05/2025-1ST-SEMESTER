@@ -1,0 +1,151 @@
+---
+
+# AD 변환이란?
+
+아날로그 신호(연속적인 값)을 디지털 신호(이산적인 값)으로 변환하는 과정
+
+---
+
+# AD 변환 과정
+
+## 1. 표본화(샘플링)
+
+- 아날로그 신호를 일정한 시간 간격으로 샘플링하여 이산적인 값으로 변환함. (연속 시간 신호를 이산 시간 신호로 변환)
+- 샘플링 주파수가 충분히 높아야 원래 신호를 정확히 복원할 수 있음(나이퀴스트 샘플링 이론)
+- 샘플링 횟수가 많아질수록 원래 신호와 유사해지지만, 데이터 양도 증가하는 단점 존재
+
+![image.png](attachment:437b06c4-6767-4162-a26e-420ff800b6f7:image.png)
+
+![스크린샷 2025-03-06 004120.png](attachment:22e7a5a0-2f0c-446d-9be3-10f1a1e9a0f0:스크린샷_2025-03-06_004120.png)
+
+## 2. 양자화
+
+- 샘플링된 값을  ADC의 해상도에 따라 가장 가까운 디지털 값으로 변환함.
+- 해상도가 높을수록 더 정밀한 변환이 가능함.
+- 추출된 샘플링 신호의 레벨을 여러 단계로 나눔.
+- Y측 방향으로 신호의 값을 구간별로 구분하고 대표값으로 치환함.
+
+![image.png](attachment:afecd25b-5e3e-405b-8db1-3c7eb00edb7f:image.png)
+
+## 3. 부호화
+
+- 양자화된 값을 이진수로 변환하여 디지털 시스템에서 처리할 수 있도록 함.
+- 양자화된 레벨에 속한 값을 이진수로 변환
+- 각 구간에 이진 부호를 할당하여 최종적으로 디지털 신호로 변
+
+![image.png](attachment:1c3529d9-af44-4ceb-b2fc-fb0d72a99c39:image.png)
+
+---
+
+# 코드
+
+```jsx
+#define WINDOW_SIZE 6
+
+class RecursiveMovingAverage
+{
+  private:
+    float sensorData[WINDOW_SIZE];
+    int windowSize;
+
+  public:
+    RecursiveMovingAverage() : windowSize(WINDOW_SIZE)
+    {
+      for (int i = 0; i < windowSize; i++)
+      {
+        sensorData[i] = 0.0;
+      }
+    }
+
+    float update(float adValue, float avgOld)
+    {
+      float avg = 0.0;
+      float oldValue = sensorData[0];
+
+      for (int i = 0; i < windowSize - 1; i++)
+      {
+        sensorData[i] = sensorData[i + 1];
+      }
+      sensorData[windowSize - 1] = adValue;
+
+      avg = avgOld + (sensorData[windowSize - 1] - oldValue) / windowSize;
+
+      return avg;
+    }
+};
+
+RecursiveMovingAverage movingAvg1;
+RecursiveMovingAverage movingAvg2;
+
+float read_front_steering_sensor_adc()
+{
+  static float avgOld1 = 0
+  float adValue = (float)analogRead(A0); 
+  float ad_value = movingAvg1.update(adValue, avgOld1);
+  avgOld1 = ad_value;
+  return ad_value;
+}
+
+void setup() 
+{
+  Serial.begin(9600);
+}
+
+void loop() 
+{
+  float smoothedValue = read_front_steering_sensor_adc();
+
+  Serial.print("Smoothed Sensor Value: ");
+  Serial.println(smoothedValue);
+
+  delay(100);
+ 
+}
+```
+
+---
+
+# 코드 분석
+
+### 1. **RecursiveMovingAverage 클래스**
+
+- `WINDOW_SIZE`(6) 크기의 배열 `sensorData[]`을 사용하여 최근 6개의 센서 데이터를 저장.
+- `update(float adValue, float avgOld)` 함수:
+    - 새로운 센서 값 `adValue`를 배열의 마지막 위치에 추가.
+    - 가장 오래된 값을 제거하고 새로운 평균을 계산.
+    - `avgOld`를 이용하여 재귀적으로 평균을 업데이트.
+
+---
+
+### 2. **센서 데이터 처리**
+
+- `read_front_steering_sensor_adc()` 함수:
+    - `analogRead(A0)`를 이용해 A0 핀에서 아날로그 값을 읽음.
+    - `RecursiveMovingAverage` 객체(`movingAvg1`)를 사용하여 이동 평균 계산.
+    - `avgOld1`을 업데이트하여 재귀 이동 평균을 유지.
+
+---
+
+# 결과
+
+## 5.5v
+
+[_talkv_wxiwh3Q93m_GFscfiXeFQMAlpDB72yvDK_talkv_high.mov](attachment:338e452b-766a-4eee-9c8d-99cfa809dc2c:_talkv_wxiwh3Q93m_GFscfiXeFQMAlpDB72yvDK_talkv_high.mov)
+
+<aside>
+💡
+
+**1023**
+
+</aside>
+
+## 3.3v
+
+[_talkv_wxiwh3Q93m_GFscfiXeFQMAlpDB72yvDK_talkv_high.mov](attachment:f7749eec-ba8e-4a4f-82a6-0282c0a4cea4:_talkv_wxiwh3Q93m_GFscfiXeFQMAlpDB72yvDK_talkv_high.mov)
+
+<aside>
+💡
+
+**675~677**
+
+</aside>
