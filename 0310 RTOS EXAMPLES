@@ -1,0 +1,152 @@
+#1
+
+#include <Arduino_FreeRTOS.h>// 핀 설정
+#define LED_PIN 13
+#define BUTTON_PIN 2
+
+// LED 상태 변수
+volatile bool ledState = false;
+
+// 인터럽트 서비스 루틴
+void IRAM_ATTR buttonISR() {
+    ledState = !ledState;
+}
+
+// LED 점멸 태스크
+void BlinkTask(void *pvParameters) {
+    pinMode(LED_PIN, OUTPUT);
+
+    while (1) {
+        digitalWrite(LED_PIN, ledState);
+        vTaskDelay(pdMS_TO_TICKS(500)); // 500ms 대기
+    }
+}
+
+// 버튼 감지 태스크
+void ButtonTask(void *pvParameters) {
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), buttonISR, FALLING);
+
+    while (1) {
+        // 버튼이 눌릴 때까지 대기 (인터럽트 사용)
+        vTaskDelay(pdMS_TO_TICKS(100)); // 100ms 대기
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+    Serial.println("RTOS LED & Button 예제 시작");
+
+    xTaskCreate(BlinkTask, "LED Blink", 128, NULL, 1, NULL);
+    xTaskCreate(ButtonTask, "Button Read", 128, NULL, 2, NULL);
+}
+
+void loop() {
+    // FreeRTOS 사용 시 loop()는 필요 없음
+}
+
+#2
+
+#include <Arduino_FreeRTOS.h>#include <semphr.h>// ADC 핀
+#define SENSOR_PIN A0
+
+// 센서 데이터 공유 변수
+volatile int sensorValue = 0;
+
+// 뮤텍스 핸들
+SemaphoreHandle_t xSerialMutex;
+
+// ADC 읽기 태스크
+void ReadSensorTask(void *pvParameters) {
+    while (1) {
+        sensorValue = analogRead(SENSOR_PIN);
+        vTaskDelay(pdMS_TO_TICKS(500)); // 500ms 대기
+    }
+}
+
+// 데이터 출력 태스크
+void PrintTask(void *pvParameters) {
+    while (1) {
+        if (xSemaphoreTake(xSerialMutex, portMAX_DELAY) == pdTRUE) {
+            Serial.print("Sensor Value: ");
+            Serial.println(sensorValue);
+            xSemaphoreGive(xSerialMutex);
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000)); // 1초마다 출력
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+    Serial.println("RTOS ADC & UART 예제 시작");
+
+    xSerialMutex = xSemaphoreCreateMutex();
+
+    xTaskCreate(ReadSensorTask, "ADC Read", 128, NULL, 1, NULL);
+    xTaskCreate(PrintTask, "UART Print", 128, NULL, 2, NULL);
+}
+
+void loop() {
+    // FreeRTOS 사용 시 loop()는 필요 없음
+}
+
+#3
+
+#include <Arduino_FreeRTOS.h>#include <queue.h>// 초음파 센서 핀
+#define TRIG_PIN 9
+#define ECHO_PIN 10
+
+// 큐 핸들
+QueueHandle_t xDistanceQueue;
+
+// 초음파 거리 측정 태스크
+void UltrasonicTask(void *pvParameters) {
+    pinMode(TRIG_PIN, OUTPUT);
+    pinMode(ECHO_PIN, INPUT);
+
+    while (1) {
+        // 초음파 신호 송신
+        digitalWrite(TRIG_PIN, LOW);
+        delayMicroseconds(2);
+        digitalWrite(TRIG_PIN, HIGH);
+        delayMicroseconds(10);
+        digitalWrite(TRIG_PIN, LOW);
+
+        // 초음파 신호 수신
+        long duration = pulseIn(ECHO_PIN, HIGH);
+        float distance = duration * 0.034 / 2; // cm 단위로 변환
+
+        // 큐에 거리 데이터 저장
+        xQueueSend(xDistanceQueue, &distance, portMAX_DELAY);
+        vTaskDelay(pdMS_TO_TICKS(500)); // 500ms 대기
+    }
+}
+
+// 데이터 출력 태스크
+void PrintDistanceTask(void *pvParameters) {
+    float receivedDistance;
+
+    while (1) {
+        if (xQueueReceive(xDistanceQueue, &receivedDistance, portMAX_DELAY) == pdTRUE) {
+            Serial.print("Distance: ");
+            Serial.print(receivedDistance);
+            Serial.println(" cm");
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000)); // 1초마다 출력
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+    Serial.println("RTOS 초음파 센서 예제 시작");
+
+    xDistanceQueue = xQueueCreate(5, sizeof(float));
+
+    xTaskCreate(UltrasonicTask, "Ultrasonic Read", 128, NULL, 1, NULL);
+    xTaskCreate(PrintDistanceTask, "Print Distance", 128, NULL, 2, NULL);
+}
+
+void loop() {
+    // FreeRTOS 사용 시 loop()는 필요 없음
+}
+
