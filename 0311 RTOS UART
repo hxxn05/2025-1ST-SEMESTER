@@ -1,0 +1,678 @@
+#include <Arduino_FreeRTOS.h>
+#include <semphr.h>
+
+// 시리얼 통신을 위한 버퍼 크기
+#define SERIAL_BUFFER_SIZE 64
+
+// 버퍼 및 세마포어 선언
+char txBuffer[SERIAL_BUFFER_SIZE];
+char rxBuffer[SERIAL_BUFFER_SIZE];
+SemaphoreHandle_t xSerialSemaphore;
+
+// 태스크 함수 선언
+void TaskSerial(void *pvParameters);
+void TaskTransmit(void *pvParameters);
+void TaskReceive(void *pvParameters);
+
+void setup() {
+  // 디버그용 시리얼 초기화
+  Serial.begin(115200);
+  while (!Serial) 
+  {
+    ; // 시리얼 포트가 연결될 때까지 대기
+  }
+  
+  // 통신용 시리얼 초기화
+  Serial1.begin(9600);
+  while (!Serial1) 
+  {
+    ; // 시리얼 포트가 연결될 때까지 대기
+  }
+  
+  // 세마포어 생성
+  xSerialSemaphore = xSemaphoreCreateMutex();
+  
+  if (xSerialSemaphore != NULL) {
+    // 디버그 메시지 출력 태스크 생성
+    xTaskCreate(
+      TaskSerial,
+      "Serial",
+      128,   // 스택 크기
+      NULL,
+      2,     // 우선순위
+      NULL);
+      
+    // 데이터 송신 태스크 생성
+    xTaskCreate(
+      TaskTransmit,
+      "Transmit",
+      128,   // 스택 크기
+      NULL,
+      1,     // 우선순위
+      NULL);
+      
+    // 데이터 수신 태스크 생성
+    xTaskCreate(
+      TaskReceive,
+      "Receive",
+      128,   // 스택 크기
+      NULL,
+      1,     // 우선순위
+      NULL);
+      
+    // 태스크 스케줄러 시작
+    vTaskStartScheduler();
+  }
+}
+
+void loop() {
+  // FreeRTOS가 태스크를 관리하므로 메인 루프는 사용하지 않음
+}
+
+// 디버그 메시지 출력 태스크
+void TaskSerial(void *pvParameters) {
+  (void) pvParameters;
+  
+  for (;;) {
+    // 세마포어를 획득하여 디버그 메시지 출력
+    if (xSemaphoreTake(xSerialSemaphore, (TickType_t)10) == pdTRUE) {
+      Serial.println("Debug: System running");
+      
+      // 세마포어 반환
+      xSemaphoreGive(xSerialSemaphore);
+    }
+    
+    // 1초마다 메시지 출력
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  }
+}
+
+// 데이터 송신 태스크
+void TaskTransmit(void *pvParameters) {
+  (void) pvParameters;
+  
+  for (;;) {
+    // 전송할 데이터 준비 (예: 센서 데이터 또는 테스트 데이터)
+    sprintf(txBuffer, "Data: %lu", millis());
+    
+    // 세마포어 획득
+    if (xSemaphoreTake(xSerialSemaphore, (TickType_t)10) == pdTRUE) {
+      // 디버그 메시지
+      Serial.print("Transmitting: ");
+      Serial.println(txBuffer);
+      
+      // 데이터 전송
+      Serial1.println(txBuffer);
+      
+      // 세마포어 반환
+      xSemaphoreGive(xSerialSemaphore);
+    }
+    
+    // 500ms마다 데이터 전송
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+  }
+}
+
+// 데이터 수신 태스크
+void TaskReceive(void *pvParameters) {
+  (void) pvParameters;
+  
+  int index = 0;
+  char incomingByte;
+  
+  for (;;) {
+    // Serial1에서 데이터 수신 확인
+    if (Serial1.available() > 0) {
+      // 세마포어 획득
+      if (xSemaphoreTake(xSerialSemaphore, (TickType_t)10) == pdTRUE) {
+        // 데이터 읽기
+        incomingByte = Serial1.read();
+        
+        // 버퍼에 저장 (버퍼 오버플로우 방지)
+        if (index < SERIAL_BUFFER_SIZE - 1) {
+          rxBuffer[index] = incomingByte;
+          index++;
+          
+          // 줄바꿈 문자가 감지되면 수신 완료로 처리
+          if (incomingByte == '\n') {
+            rxBuffer[index] = '\0';  // 문자열 종료
+            
+            // 디버그 메시지
+            Serial.print("Received: ");
+            Serial.println(rxBuffer);
+            
+            // 수신 버퍼 초기화
+            index = 0;
+          }
+        } else {
+          // 버퍼 오버플로우 방지를 위해 인덱스 초기화
+          index = 0;
+        }
+        
+        // 세마포어 반환
+        xSemaphoreGive(xSerialSemaphore);
+      }
+    }
+    
+    // 잠시 대기 (CPU 사용량 감소)
+    vTaskDelay(1 / portTICK_PERIOD_MS);
+  }
+}
+
+
+
+
+
+
+
+
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+from __future__ import print_function
+import math
+import os
+import sys
+import time
+import threading
+import signal  # signal 모듈 추가
+import ntplib  # current time
+import ntplib
+import glob
+import serial
+import serial.tools.list_ports
+
+
+# PyQt5 imports
+from PyQt5.QtCore import *
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import *
+from PyQt5 import uic
+from PyQt5.QtWidgets import QWidget, QTabWidget, QAction
+from PyQt5.QtGui import *
+from PyQt5.QtCore import QEvent
+from PyQt5.QtCore import QTimer
+
+import numpy as np
+# UI 파일 로드
+form_class = uic.loadUiType("Serial_com.ui")[0]
+
+
+class Serial_Control:
+	def __init__(self):
+		self.serial_port = None
+		self.serial_command_type = 0
+		self.found_motors = []  # 발견된 모터 ID 저장용
+		self.is_scanning = False  # 스캔 상태 표시
+		self.serial_reader = None  # 추가
+		
+	def connect_serial(self, port, baudrate=115200):
+		"""시리얼 포트 연결"""
+		if not port:
+			print("No port specified")
+			return False
+			
+		try:
+			# 이미 열려있는 포트가 있으면 닫기
+			if self.serial_port and self.serial_port.is_open:
+				self.serial_port.close()
+				time.sleep(0.5)  # 포트가 완전히 닫힐 때까지 잠시 대기
+			
+			self.serial_port = serial.Serial(
+				port=port,
+				baudrate=baudrate,
+				bytesize=serial.EIGHTBITS,
+				parity=serial.PARITY_NONE,
+				stopbits=serial.STOPBITS_ONE,
+				timeout=1.0,          # 타임아웃 설정 증가
+				write_timeout=1.0,    # 쓰기 타임아웃 설정 증가
+				exclusive=True        # 독점 모드로 열기 (다른 프로세스가 접근 불가)
+			)
+			
+			# 연결 후 잠시 대기
+			time.sleep(0.5)
+			
+			# 버퍼 초기화
+			self.serial_port.reset_input_buffer()
+			self.serial_port.reset_output_buffer()
+			
+			return True
+		except serial.SerialException as e:
+			print(f"Serial connection error: {e}")
+			return False
+		except OSError as e:
+			print(f"OS Error during serial connection: {e}")
+			return False
+		except Exception as e:
+			print(f"Unexpected error during serial connection: {e}")
+			return False
+	
+	def disconnect_serial(self):
+		
+		# 스레드 종료 이벤트 설정
+		if self.serial_reader:
+			self.serial_reader.exit_event.set()  
+			self.serial_reader.running = False
+			self.serial_reader.join()  # 스레드 종료 대기
+			self.serial_reader = None
+		
+		"""시리얼 포트 연결 해제"""
+		if self.serial_port and self.serial_port.is_open:
+			self.serial_port.close()
+	
+	
+	def send_test_data(self):
+		speed = 0
+		""" 로봇 속도 설정 - 11 byte 프로토콜"""
+		if self.serial_port and self.serial_port.is_open:
+			protocol = bytearray([0] * 11)  # 11 byte로 변경
+			self.serial_command_type = 5
+
+			# 헤더 및 명령어
+			protocol[0] = ord('#')
+			protocol[1] = ord('R')
+			protocol[2] = ord('S')  # 'P' 추가
+			protocol[3] = 0x00  # Motor ID 설정  
+			
+			# 속도 데이터
+			protocol[4] = (speed >> 8) & 0xFF  # High byte
+			protocol[5] = speed & 0xFF         # Low byte
+			
+			# 예비 영역 추가 (프로토콜 맞춤)
+			protocol[6] = 0x00
+			protocol[7] = 0x00
+			
+			# CRC 계산 및 설정 (8바이트에 대해 계산)
+			crc = self.CRC16_MODBUS(protocol[:8], 8)
+			protocol[8] = crc & 0xFF          # CRC Low byte
+			protocol[9] = (crc >> 8) & 0xFF   # CRC High byte
+			
+			# 종료 문자
+			protocol[10] = ord('*')
+			
+			# 데이터 출력
+			print("Send: ", end='')
+			for byte in protocol:
+				print(f"0x{byte:02X} ", end="")
+			print()
+			
+			self.serial_port.write(protocol)
+			return True
+		return False
+		
+		
+	def CRC16_MODBUS(self, data, length):
+		wCRCTable = [
+			0X0000, 0XC0C1, 0XC181, 0X0140, 0XC301, 0X03C0, 0X0280, 0XC241, 0XC601, 0X06C0, 0X0780,
+			0XC741, 0X0500, 0XC5C1, 0XC481, 0X0440, 0XCC01, 0X0CC0, 0X0D80, 0XCD41, 0X0F00, 0XCFC1,
+			0XCE81, 0X0E40, 0X0A00, 0XCAC1, 0XCB81, 0X0B40, 0XC901, 0X09C0, 0X0880, 0XC841, 0XD801,
+			0X18C0, 0X1980, 0XD941, 0X1B00, 0XDBC1, 0XDA81, 0X1A40, 0X1E00, 0XDEC1, 0XDF81, 0X1F40,
+			0XDD01, 0X1DC0, 0X1C80, 0XDC41, 0X1400, 0XD4C1, 0XD581, 0X1540, 0XD701, 0X17C0, 0X1680,
+			0XD641, 0XD201, 0X12C0, 0X1380, 0XD341, 0X1100, 0XD1C1, 0XD081, 0X1040, 0XF001, 0X30C0,
+			0X3180, 0XF141, 0X3300, 0XF3C1, 0XF281, 0X3240, 0X3600, 0XF6C1, 0XF781, 0X3740, 0XF501,
+			0X35C0, 0X3480, 0XF441, 0X3C00, 0XFCC1, 0XFD81, 0X3D40, 0XFF01, 0X3FC0, 0X3E80, 0XFE41,
+			0XFA01, 0X3AC0, 0X3B80, 0XFB41, 0X3900, 0XF9C1, 0XF881, 0X3840, 0X2800, 0XE8C1, 0XE981,
+			0X2940, 0XEB01, 0X2BC0, 0X2A80, 0XEA41, 0XEE01, 0X2EC0, 0X2F80, 0XEF41, 0X2D00, 0XEDC1,
+			0XEC81, 0X2C40, 0XE401, 0X24C0, 0X2580, 0XE541, 0X2700, 0XE7C1, 0XE681, 0X2640, 0X2200,
+			0XE2C1, 0XE381, 0X2340, 0XE101, 0X21C0, 0X2080, 0XE041, 0XA001, 0X60C0, 0X6180, 0XA141,
+			0X6300, 0XA3C1, 0XA281, 0X6240, 0X6600, 0XA6C1, 0XA781, 0X6740, 0XA501, 0X65C0, 0X6480,
+			0XA441, 0X6C00, 0XACC1, 0XAD81, 0X6D40, 0XAF01, 0X6FC0, 0X6E80, 0XAE41, 0XAA01, 0X6AC0,
+			0X6B80, 0XAB41, 0X6900, 0XA9C1, 0XA881, 0X6840, 0X7800, 0XB8C1, 0XB981, 0X7940, 0XBB01,
+			0X7BC0, 0X7A80, 0XBA41, 0XBE01, 0X7EC0, 0X7F80, 0XBF41, 0X7D00, 0XBDC1, 0XBC81, 0X7C40,
+			0XB401, 0X74C0, 0X7580, 0XB541, 0X7700, 0XB7C1, 0XB681, 0X7640, 0X7200, 0XB2C1, 0XB381,
+			0X7340, 0XB101, 0X71C0, 0X7080, 0XB041, 0X5000, 0X90C1, 0X9181, 0X5140, 0X9301, 0X53C0,
+			0X5280, 0X9241, 0X9601, 0X56C0, 0X5780, 0X9741, 0X5500, 0X95C1, 0X9481, 0X5440, 0X9C01,
+			0X5CC0, 0X5D80, 0X9D41, 0X5F00, 0X9FC1, 0X9E81, 0X5E40, 0X5A00, 0X9AC1, 0X9B81, 0X5B40,
+			0X9901, 0X59C0, 0X5880, 0X9841, 0X8801, 0X48C0, 0X4980, 0X8941, 0X4B00, 0X8BC1, 0X8A81,
+			0X4A40, 0X4E00, 0X8EC1, 0X8F81, 0X4F40, 0X8D01, 0X4DC0, 0X4C80, 0X8C41, 0X4400, 0X84C1,
+			0X8581, 0X4540, 0X8701, 0X47C0, 0X4680, 0X8641, 0X8201, 0X42C0, 0X4380, 0X8341, 0X4100,
+			0X81C1, 0X8081, 0X4040
+		]
+
+		wCRCWord = 0xFFFF
+		i = 0
+		
+		while length > 0:
+			nTemp = data[i] ^ (wCRCWord & 0xFF)
+			wCRCWord >>= 8
+			wCRCWord ^= wCRCTable[nTemp]
+			i += 1
+			length -= 1
+			
+		return wCRCWord	
+		
+		
+
+class SerialReaderThread(threading.Thread):
+	def __init__(self, serial_control, window_class, exit_event=None):
+		super().__init__()
+		self.serial_control = serial_control
+		self.window_class = window_class
+		self.running = False
+		self.read_buf = bytearray([0] * 1024)  # 충분한 크기로 버퍼 확장
+		self.exit_event = exit_event if exit_event else threading.Event()
+		self.daemon = True  # 메인 스레드가 종료되면 자동으로 종료되도록 설정
+		
+	def clear_buffers(self):
+		"""버퍼 초기화"""
+		self.read_buf = bytearray([0] * 1024)
+
+	def run(self):
+		print(f"Serial reader thread {self.name} started")
+		self.running = True
+		error_count = 0
+		max_errors = 5  # 최대 연속 오류 횟수
+		
+		while self.running and not self.exit_event.is_set():
+			try:
+				# 시리얼 포트 확인
+				if not self.serial_control.serial_port:
+					time.sleep(0.1)
+					continue
+					
+				if not self.serial_control.serial_port.is_open:
+					time.sleep(0.1)
+					continue
+				
+				# 데이터 읽기 시도
+				try:
+					if self.serial_control.serial_port.in_waiting > 0:
+						data = self.serial_control.serial_port.read(self.serial_control.serial_port.in_waiting)
+						if data:
+							# HEX 형식과 ASCII 형식으로 변환
+							hex_str = ' '.join([f"{b:02X}" for b in data])
+							
+							# ASCII 변환 시도
+							try:
+								ascii_str = data.decode('ascii', errors='replace')
+							except UnicodeDecodeError:
+								ascii_str = ''.join([chr(b) if 32 <= b <= 126 else '.' for b in data])
+							
+							# QT 신호를 통해 UI 업데이트 (스레드 안전)
+							self.window_class.update_received_data_signal.emit(hex_str, ascii_str)
+							
+							# 오류 카운터 리셋
+							error_count = 0
+				except (OSError, serial.SerialException) as e:
+					error_count += 1
+					print(f"Serial read error ({error_count}/{max_errors}): {e}")
+					
+					if error_count >= max_errors:
+						print("Too many serial errors, stopping thread")
+						self.running = False
+						break
+						
+					# 오류 발생 시 잠시 대기
+					time.sleep(0.5)
+			except Exception as e:
+				print(f"Unexpected error in serial reader thread: {e}")
+				time.sleep(0.5)
+			
+			# CPU 부하 방지를 위한 대기
+			time.sleep(0.05)  # 대기 시간 약간 증가
+		
+		print(f"Serial reader thread {self.name} stopped")
+	
+	def stop(self):
+		"""스레드 안전하게 종료하는 메소드"""
+		self.exit_event.set()
+		self.running = False
+		try:
+			print("Stop thread")
+			self.join(timeout=1.0)  # 1초 동안 스레드 종료 대기
+		except Exception as e:
+			print(f"Error stopping thread: {e}")	
+
+class WindowClass(QDialog, form_class):
+	# 시그널 정의
+	update_received_data_signal = pyqtSignal(str, str)
+	
+	def __init__(self):
+		super().__init__()
+		self.setupUi(self)
+		self.setWindowTitle("Serial Control")
+		
+		# Robot Control 인스턴스 생성
+		self.serial_control = Serial_Control()
+		
+		# 시리얼 리더 스레드
+		self.serial_reader = None
+        
+		# 시리얼 포트 관련 변수
+		self.serial_port = None
+		self.is_connected = False
+		self.checkBox_USB.setChecked(True)	
+		
+		# 시그널 연결
+		self.update_received_data_signal.connect(self.update_received_data)
+		
+		self.init_ui()
+		
+	def init_ui(self):
+		# 시리얼 포트 검색 및 콤보박스에 추가
+		self.update_serial_ports()
+		
+		self.checkBox_USB.stateChanged.connect(self.update_serial_ports)  # 체크박스 상태 변경 시그널 연결
+		self.pushButton_Connect.clicked.connect(self.connect_serial)
+		self.pushButton_Clear_Terminal.clicked.connect(self.clear_terminal)
+		self.pushButton_Test.clicked.connect(self.send_test_uart_data)
+		
+		# buttonBox의 OK와 Cancel 버튼 시그널 연결
+		self.buttonBox.accepted.connect(self.on_button_box_accepted)
+		self.buttonBox.rejected.connect(self.on_button_box_rejected)
+
+	def update_serial_ports(self):
+		"""시리얼 포트 목록을 업데이트합니다."""
+		self.comboBox_Serial_Port_No.clear()
+		
+		if self.checkBox_USB.isChecked():  # USB만 검색
+			# ttyUSB 장치만 추가 (Linux)
+			for usb in glob.glob('/dev/ttyUSB*'):
+				self.comboBox_Serial_Port_No.addItem(usb)
+		else:  # 모든 포트 검색
+			# Linux와 Windows 모두 지원하도록 구현
+			ports = list(serial.tools.list_ports.comports())
+			
+			for port in ports:
+				self.comboBox_Serial_Port_No.addItem(port.device)
+				
+			# ttyUSB 장치 추가 (Linux)
+			for usb in glob.glob('/dev/ttyUSB*'):
+				if usb not in [port.device for port in ports]:
+					self.comboBox_Serial_Port_No.addItem(usb)
+					
+			# ttyACM 장치 추가 (Linux)
+			for acm in glob.glob('/dev/ttyACM*'):
+				if acm not in [port.device for port in ports]:
+					self.comboBox_Serial_Port_No.addItem(acm)	
+	
+	def connect_serial(self):
+		if not self.is_connected:
+			try:
+				port = self.comboBox_Serial_Port_No.currentText()
+				if not port:
+					QMessageBox.warning(self, "Warning", "No serial port selected")
+					return
+					
+				if self.serial_control.connect_serial(port):
+					self.is_connected = True
+					self.pushButton_Connect.setText("Disconnect")
+					self.comboBox_Serial_Port_No.setEnabled(False)
+					
+					QMessageBox.information(self, "Connection", f"Successfully connected to {port}")
+					
+					# 이전 스레드가 있다면 정리
+					if self.serial_reader:
+						self.serial_reader.exit_event.set()
+						self.serial_reader.running = False
+						try:
+							self.serial_reader.join(timeout=1.0)  # 스레드 종료 대기 (타임아웃 설정)
+						except:
+							pass
+						self.serial_reader = None
+					
+					# 새 스레드 시작
+					self.serial_reader = SerialReaderThread(self.serial_control, self)
+					self.serial_control.serial_reader = self.serial_reader
+					self.serial_reader.start()
+				else:
+					QMessageBox.critical(self, "Error", "Failed to connect to the serial port")
+			except OSError as e:
+				if e.errno == 5:  # Input/output error
+					QMessageBox.critical(self, "Error", f"Input/output error: The device may be in use by another program or doesn't exist")
+				else:
+					QMessageBox.critical(self, "Error", f"OS Error: {str(e)}")
+				self.is_connected = False
+			except serial.SerialException as e:
+				QMessageBox.critical(self, "Error", f"Serial Error: {str(e)}")
+				self.is_connected = False
+			except Exception as e:
+				QMessageBox.critical(self, "Error", f"Unexpected error: {str(e)}")
+				self.is_connected = False
+		else:
+			try:
+				self.serial_control.disconnect_serial()
+				self.is_connected = False
+				self.pushButton_Connect.setText("Connect")
+				self.comboBox_Serial_Port_No.setEnabled(True)
+				QMessageBox.information(self, "Disconnection", "Successfully disconnected")
+			except Exception as e:
+				QMessageBox.critical(self, "Error", f"Failed to disconnect: {str(e)}")
+	
+	def clear_terminal(self):
+		# 터미널 클리어 (콘솔)
+		os.system('clear' if os.name == 'posix' else 'cls')
+		
+		# 텍스트 에디터 클리어
+		self.plainTextEdit_HEX.clear()
+		self.plainTextEdit_ASCII.clear()
+	
+	def update_received_data(self, hex_str, ascii_str):
+		"""수신 데이터를 UI에 업데이트하는 함수"""
+		try:
+			# 텍스트 길이 제한 (너무 길면 이전 데이터 제거)
+			max_length = 10000  # 최대 문자 수
+			
+			# HEX 데이터 업데이트
+			cursor = self.plainTextEdit_HEX.textCursor()
+			cursor.movePosition(QTextCursor.End)
+			if self.plainTextEdit_HEX.toPlainText():
+				cursor.insertText('\n' + hex_str)
+			else:
+				cursor.insertText(hex_str)
+				
+			# 텍스트가 너무 길어지면 앞부분 제거
+			if len(self.plainTextEdit_HEX.toPlainText()) > max_length:
+				text = self.plainTextEdit_HEX.toPlainText()
+				self.plainTextEdit_HEX.setPlainText(text[-max_length:])
+				
+			# 스크롤을 아래로 이동
+			self.plainTextEdit_HEX.moveCursor(QTextCursor.End)
+			
+			# ASCII 데이터 업데이트
+			cursor = self.plainTextEdit_ASCII.textCursor()
+			cursor.movePosition(QTextCursor.End)
+			if self.plainTextEdit_ASCII.toPlainText():
+				cursor.insertText('\n' + ascii_str)
+			else:
+				cursor.insertText(ascii_str)
+				
+			# 텍스트가 너무 길어지면 앞부분 제거
+			if len(self.plainTextEdit_ASCII.toPlainText()) > max_length:
+				text = self.plainTextEdit_ASCII.toPlainText()
+				self.plainTextEdit_ASCII.setPlainText(text[-max_length:])
+				
+			# 스크롤을 아래로 이동
+			self.plainTextEdit_ASCII.moveCursor(QTextCursor.End)
+		except Exception as e:
+			print(f"Error updating display: {e}")
+			
+	def send_test_uart_data(self):
+		if not self.is_connected:
+			QMessageBox.critical(self, "Error", "Please connect to the robot first")
+			return
+			
+		try:
+			print("Send test data UART")
+			self.serial_control.send_test_data()
+		except Exception as e:
+			QMessageBox.critical(self, "Error", f"Failed to send test data: {str(e)}")
+
+		
+	def closeEvent(self, event):
+		"""애플리케이션 종료 시 호출되는 이벤트 핸들러"""
+		try:
+			print("Closing application, cleaning up resources...")
+			
+			# 시리얼 리더 스레드 종료
+			if self.serial_reader:
+				self.serial_reader.exit_event.set()  # 종료 이벤트 설정
+				self.serial_reader.running = False
+				try:
+					self.serial_reader.join(timeout=1.0)  # 최대 1초 대기
+				except:
+					pass
+				self.serial_reader = None
+			
+			# 시리얼 포트 연결 해제
+			if self.serial_control:
+				self.serial_control.disconnect_serial()
+				
+			event.accept()
+		except Exception as e:
+			print(f"Error during application close: {e}")
+			event.accept()  # 에러가 발생해도 종료는 진행	
+			
+	def on_window_close(self):
+		"""윈도우가 닫힐 때 호출되는 메서드"""
+		print("Window closing, cleaning up resources...")
+		
+		# 시리얼 리더 스레드 종료
+		if self.serial_reader:
+			try:
+				print("Stopping serial reader thread...")
+				self.serial_reader.exit_event.set()
+				self.serial_reader.running = False
+				self.serial_reader.join(timeout=1.0)  # 최대 1초 대기
+				if self.serial_reader in global_threads:
+					global_threads.remove(self.serial_reader)
+				self.serial_reader = None
+				print("Serial reader thread stopped")
+			except Exception as e:
+				print(f"Error stopping serial reader thread: {e}")
+		
+		# 시리얼 포트 연결 해제
+		if self.is_connected:
+			try:
+				self.serial_control.disconnect_serial()
+				self.is_connected = False
+				print("Serial port disconnected")
+			except Exception as e:
+				print(f"Error disconnecting serial port: {e}")		
+	
+	def on_button_box_accepted(self):
+		"""OK 버튼 클릭 시 호출되는 메서드"""
+		print("OK button pressed, closing application...")
+		self.on_window_close()
+		self.accept()  # OK 버튼 눌렀을 때 창 닫기
+		
+	def on_button_box_rejected(self):
+		"""Cancel 버튼 클릭 시 호출되는 메서드"""
+		print("Cancel button pressed, closing application...")
+		self.on_window_close()
+		self.reject()  # Cancel 버튼 눌렀을 때 창 닫기
+
+	
+	
+	
+	
+	
+							
+def main():
+	app = QApplication(sys.argv)
+	window = WindowClass()
+	window.show()
+	sys.exit(app.exec_())
+
+if __name__ == "__main__":
+    main()
