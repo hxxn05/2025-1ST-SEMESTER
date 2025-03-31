@@ -1,0 +1,345 @@
+#PY 
+# send_data.py
+import serial
+import time
+
+def crc16_modbus(data):
+    """Modbus CRC-16 계산 함수"""
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 0x0001:
+                crc >>= 1
+                crc ^= 0xA001
+            else:
+                crc >>= 1
+    return crc
+
+def send_data():
+    try:
+        # 첫 번째 포트 (/dev/ttyS0) 설정
+        ser1 = serial.Serial(
+            port='/dev/ttyS0',  
+            baudrate=115200,    
+            bytesize=serial.EIGHTBITS,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+            timeout=1
+        )
+
+        # 두 번째 포트 (/dev/ttyUSB0) 설정
+        ser2 = serial.Serial(
+            port='/dev/ttyUSB0',  
+            baudrate=115200,    
+            bytesize=serial.EIGHTBITS,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+            timeout=1
+        )
+        
+        count = 0
+        while True:
+            # 첫 번째 데이터: #S4321* (/dev/ttyS0)
+            start_bytes1 = b'#S'  # 2바이트
+            value1 = 4321  # 16비트 정수
+            value_bytes1 = value1.to_bytes(2, byteorder='big')  # 2바이트 (big-endian)
+            end_byte1 = b'*'  # 1바이트
+            data1 = start_bytes1 + value_bytes1 + end_byte1
+            crc1 = crc16_modbus(data1)
+            crc_lsb1 = crc1 & 0xFF  # 하위 바이트
+            crc_msb1 = (crc1 >> 8) & 0xFF  # 상위 바이트
+            final_data1 = data1 + bytes([crc_lsb1, crc_msb1])
+            
+            # 두 번째 데이터: #S9876* (/dev/ttyUSB0)
+            start_bytes2 = b'#S'  # 2바이트
+            value2 = 9876  # 16비트 정수
+            value_bytes2 = value2.to_bytes(2, byteorder='big')  # 2바이트 (big-endian)
+            end_byte2 = b'*'  # 1바이트
+            data2 = start_bytes2 + value_bytes2 + end_byte2
+            crc2 = crc16_modbus(data2)
+            crc_lsb2 = crc2 & 0xFF  # 하위 바이트
+            crc_msb2 = (crc2 >> 8) & 0xFF  # 상위 바이트
+            final_data2 = data2 + bytes([crc_lsb2, crc_msb2])
+            
+            # 데이터 송신
+            ser1.write(final_data1)
+            print(f"[{count}] Sent data to /dev/ttyS0: {final_data1.hex()} (Value: {value1}, CRC: {crc1:04X})")
+            
+            ser2.write(final_data2)
+            print(f"[{count}] Sent data to /dev/ttyUSB0: {final_data2.hex()} (Value: {value2}, CRC: {crc2:04X})")
+            
+            count += 1
+            time.sleep(1)  # 1초 간격으로 송신
+    
+    except Exception as e:
+        print(f"Error in serial communication: {e}")
+    
+    finally:
+        if 'ser1' in locals():
+            ser1.close()
+        if 'ser2' in locals():
+            ser2.close()
+
+if __name__ == "__main__":
+    send_data()
+
+#C++
+// test.cpp
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <termios.h>
+#include <unistd.h>
+#include <stdint.h>
+#include <errno.h>
+#include <pthread.h>
+
+class UART {
+private:
+    int uart_fd;                    // 시리얼 포트 파일 디스크립터
+    pthread_t read_thread;          // 읽기 스레드
+    unsigned char read_buf[7];      // 읽기 버퍼 (7바이트 고정)
+    bool running;                   // 스레드 실행 상태
+    const char* serial_device;      // 시리얼 장치 경로
+    speed_t baudrate;               // 통신 속도
+    int count;                      // 수신 카운트
+    bool motor_command_detected;    // 모터 명령 감지 여부 플래그
+
+    // CRC-16 값을 저장하기 위한 유니언
+    union {
+        uint16_t a;
+        uint8_t b[2];
+    } crc_16_val;
+
+    // CRC16_MODBUS 계산 메소드
+    static uint16_t CRC16_MODBUS(const unsigned char* data, int length) {
+        uint16_t crc = 0xFFFF;
+
+        for (int i = 0; i < length; i++) {
+            crc ^= (uint16_t)data[i];
+
+            for (int j = 0; j < 8; j++) {
+                if (crc & 0x0001) {
+                    crc = (crc >> 1) ^ 0xA001;
+                } else {
+                    crc = crc >> 1;
+                }
+            }
+        }
+        return crc;
+    }
+
+    // 프로토콜을 읽어오는 함수 (슬라이딩 윈도우 방식)
+    void read_protocol(unsigned char* buffer, unsigned char insert_buf) {
+        // 슬라이딩 윈도우: 버퍼를 한 칸씩 이동
+        for (int i = 0; i < BUFFER_SIZE - 1; i++) {
+            buffer[i] = buffer[i + 1];
+        }
+        buffer[BUFFER_SIZE - 1] = insert_buf;
+    }
+
+    // 프로토콜을 해석하는 함수
+    int decode_protocol(const unsigned char* buffer) {
+        // 시작 바이트와 종료 바이트 검증
+        if (buffer[0] != '#' || 
+            buffer[1] != 'S' ||
+            buffer[DATA_SIZE - 1] != '*') {
+            printf("[%s] Invalid protocol format - Start: 0x%02X 0x%02X, End: 0x%02X\n",
+                   serial_device, buffer[0], buffer[1], buffer[DATA_SIZE - 1]);
+            return -1;
+        }
+
+        // CRC-16 계산 (#SXXXX* 부분, DATA_SIZE 바이트)
+        crc_16_val.a = CRC16_MODBUS(buffer, DATA_SIZE);
+        if (crc_16_val.b[0] != buffer[DATA_SIZE] || 
+            crc_16_val.b[1] != buffer[DATA_SIZE + 1]) {
+            printf("[%s] CRC Error - Calculated: 0x%04X, Received: 0x%02X%02X\n", 
+                   serial_device, crc_16_val.a, 
+                   buffer[DATA_SIZE + 1], 
+                   buffer[DATA_SIZE]);
+            return -1;
+        }
+
+        // 데이터 파싱 (XXXX 부분, 2바이트를 16비트 정수로 변환)
+        uint16_t value = (buffer[2] << 8) | buffer[3];
+
+        // 파싱 결과 출력
+        printf("[%s] [%d] Decoded value: %u, CRC OK\n", serial_device, count, value);
+        return 0;
+    }
+
+    // 모터 명령 파싱 함수
+    bool parseMotorCommand(const unsigned char* data, int data_length) {
+        // 데이터가 유효한지 확인
+        if (data_length != BUFFER_SIZE) {
+            return false;
+        }
+
+        // 시작 바이트와 종료 바이트 검증
+        if (data[0] == '#' && data[1] == 'S' && data[DATA_SIZE - 1] == '*') {
+            // 프로토콜 해석
+            if (decode_protocol(data) == 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // 읽기 스레드 정적 호출 함수
+    static void* readThreadWrapper(void* instance) {
+        return ((UART*)instance)->readThreadFunction();
+    }
+
+    // 실제 읽기 스레드 함수
+    void* readThreadFunction() {
+        int num_bytes = -1;
+        unsigned char insert_buf;
+        printf("[%s] Thread started\n", serial_device);
+
+        while (running) {
+            // 1바이트씩 읽기
+            num_bytes = read(uart_fd, &insert_buf, 1);
+            if (num_bytes > 0) {
+                printf("[%s] Data read: %d bytes, Insert byte: 0x%02X\n", serial_device, num_bytes, insert_buf);
+                // 프로토콜 읽기 (슬라이딩 윈도우)
+                read_protocol(read_buf, insert_buf);
+                // 모터 명령 파싱 시도
+                if (parseMotorCommand(read_buf, 7)) {
+                    if (!motor_command_detected) {
+                        printf("[%s] Motor command detected and processed in read thread\n", serial_device);
+                        motor_command_detected = true;
+                    }
+                    count++;
+                }
+            } else if (num_bytes == 0) {
+                usleep(100000); // 0.1초 대기
+            } else if (num_bytes < 0) {
+                perror("Error reading from serial port");
+                usleep(100000);
+            }
+        }
+
+        return NULL;
+    }
+
+public:
+    // 매크로 정의 (클래스 내부에서 상수로 정의)
+    static const int BUFFER_SIZE = 7; // 버퍼 크기를 7로 설정
+    static const int DATA_SIZE = 5;   // #SXXXX* (5바이트: 2 + 2 + 1)
+    static const int PROTOCOL_SIZE = DATA_SIZE + 2; // #SXXXX* + CRC (2바이트)
+
+    // 생성자
+    UART(const char* device = "/dev/ttyS0", speed_t baud = B9600) 
+        : uart_fd(-1), running(false), serial_device(device), baudrate(baud), count(0), motor_command_detected(false) {
+        // 버퍼 초기화
+        memset(read_buf, 0, sizeof(read_buf));
+    }
+
+    // 소멸자
+    ~UART() {
+        close();
+    }
+
+    // 시리얼 포트 초기화
+    bool init() {
+        uart_fd = open(serial_device, O_RDWR);
+        if (uart_fd < 0) {
+            printf("Error %i from open: %s\n", errno, strerror(errno));
+            return false;
+        }
+
+        struct termios tty;
+        if (tcgetattr(uart_fd, &tty) != 0) {
+            printf("Error %i from tcgetattr: %s\n", errno, strerror(errno));
+            close();
+            return false;
+        }
+
+        tty.c_cflag &= ~PARENB; // 패리티 비트 비활성화
+        tty.c_cflag &= ~CSTOPB; // 스톱 비트 1개
+        tty.c_cflag &= ~CSIZE;  // 데이터 비트 크기 설정 초기화
+        tty.c_cflag |= CS8;     // 8비트 데이터
+        tty.c_cflag &= ~CRTSCTS; // 하드웨어 흐름 제어 비활성화
+        tty.c_cflag |= CREAD | CLOCAL; // 읽기 활성화 및 로컬 모드
+
+        tty.c_lflag &= ~ICANON; // 캐노니컬 모드 비활성화
+        tty.c_lflag &= ~ECHO;   // 에코 비활성화
+        tty.c_lflag &= ~ECHOE;  // 삭제 에코 비활성화
+        tty.c_lflag &= ~ECHONL; // 새 줄 에코 비활성화
+        tty.c_lflag &= ~ISIG;   // 신호 문자 해석 비활성화
+
+        tty.c_iflag &= ~(IXON | IXOFF | IXANY); // 소프트웨어 흐름 제어 비활성화
+        tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL); // 특수 바이트 처리 비활성화
+
+        tty.c_oflag &= ~OPOST; // 출력 처리 비활성화
+        tty.c_oflag &= ~ONLCR; // 개행 문자 변환 비활성화
+
+        tty.c_cc[VTIME] = 100; // 10초 타임아웃 (100 디시초)
+        tty.c_cc[VMIN] = 0;    // 최소 바이트 수 0
+
+        cfsetispeed(&tty, baudrate);
+        cfsetospeed(&tty, baudrate);
+
+        if (tcsetattr(uart_fd, TCSANOW, &tty) != 0) {
+            printf("Error %i from tcsetattr: %s\n", errno, strerror(errno));
+            close();
+            return false;
+        }
+
+        return true;
+    }
+
+    // UART 초기화 및 스레드 시작
+    bool start() {
+        // 시리얼 포트 초기화
+        if (!init()) {
+            return false;
+        }
+
+        // 스레드 시작
+        running = true;
+        if (pthread_create(&read_thread, NULL, readThreadWrapper, this) != 0) {
+            perror("Failed to create thread");
+            close();
+            return false;
+        }
+
+        return true;
+    }
+
+    // 스레드 종료 및 리소스 정리
+    void close() {
+        running = false;
+        if (pthread_join(read_thread, NULL) != 0) {
+            perror("Failed to join thread");
+        }
+        if (uart_fd >= 0) {
+            ::close(uart_fd);
+            uart_fd = -1;
+        }
+    }
+};
+
+int main() {
+    // UART 객체 생성 (두 개의 포트)
+    UART uart1("/dev/ttyS0", B115200);   // #S4321* 수신
+    UART uart2("/dev/ttyUSB0", B115200); // #S9876* 수신
+
+    // UART 시작
+    if (!uart1.start()) {
+        return 1;
+    }
+    if (!uart2.start()) {
+        return 1;
+    }
+
+    // 프로그램 종료를 기다림 (예: Ctrl+C로 종료)
+    while (true) {
+        sleep(1);
+    }
+
+    return 0;
+}
