@@ -1,0 +1,226 @@
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <termios.h>
+#include <pthread.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <sys/time.h>
+
+int uart_fd = -1;
+
+// MODBUS CRC16 계산 함수
+uint16_t CRC16_MODBUS(const uint8_t *data, uint16_t length) {
+    uint16_t crc = 0xFFFF;
+    for (uint16_t i = 0; i < length; i++) {
+        crc ^= (uint16_t)data[i];
+        for (uint8_t j = 0; j < 8; j++) {
+            if (crc & 0x0001) {
+                crc = (crc >> 1) ^ 0xA001;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    return crc;
+}
+
+// 지정된 밀리초 동안 대기하는 함수 (float 지원)
+void wait_for_milliseconds(float wait_ms) {
+    struct timeval start_time, current_time;
+    float elapsed_ms = 0;
+
+    gettimeofday(&start_time, NULL);
+    while (elapsed_ms < wait_ms) {
+        gettimeofday(&current_time, NULL); // current_time으로 명시적 수정
+        elapsed_ms = (current_time.tv_sec - start_time.tv_sec) * 1000.0f + 
+                     (current_time.tv_usec - start_time.tv_usec) / 1000.0f;
+        usleep(1000); // 1ms 대기
+    }
+}
+
+// UART 초기화 함수
+int init_uart(const char *port) {
+    uart_fd = open(port, O_RDWR | O_NOCTTY); // O_NDELAY 제거, 차단 모드
+    if (uart_fd < 0) {
+        printf("UART 열기 실패: %s\n", strerror(errno));
+        return -1;
+    }
+
+    struct termios options;
+    tcgetattr(uart_fd, &options);
+    
+    cfsetispeed(&options, B115200); // 기본 115200 bps
+    cfsetospeed(&options, B115200);
+    
+    options.c_cflag = (options.c_cflag & ~CSIZE) | CS8;
+    options.c_cflag &= ~PARENB;
+    options.c_cflag &= ~CSTOPB;
+    options.c_cflag |= CLOCAL | CREAD;
+    options.c_iflag = 0;
+    options.c_oflag = 0;
+    options.c_lflag = 0;
+    
+    options.c_cc[VTIME] = 20; // 2초 타임아웃
+    options.c_cc[VMIN] = 0;   // 최소 바이트 0
+
+    tcflush(uart_fd, TCIFLUSH);
+    if (tcsetattr(uart_fd, TCSANOW, &options) != 0) {
+        printf("UART 설정 실패: %s\n", strerror(errno));
+        close(uart_fd);
+        return -1;
+    }
+    
+    return 0;
+}
+
+// Baudrate 파싱 함수
+int32_t parseBaudRateResponse(const uint8_t *response, int data_length, uint8_t device_addr) {
+    if (data_length < 7) {
+        printf("응답 길이 부족: %d 바이트 (최소 7바이트 필요)\n", data_length);
+        return -1;
+    }
+
+    if (response[0] == device_addr && response[1] == 0x03 && response[2] == 0x02) {
+        uint16_t receivedCRC = (response[6] << 8) | response[5];
+        uint16_t calculatedCRC = CRC16_MODBUS(response, 5);
+
+        if (receivedCRC == calculatedCRC) {
+            uint16_t bps_raw = (response[3] << 8) | response[4];
+            uint32_t bps;
+
+            switch (bps_raw) {
+                case 0x0007: bps = 115200; break;
+                case 0x0006: bps = 57600; break;
+                case 0x0004: bps = 19200; break;
+                case 0x0003: bps = 9600; break;
+                case 0x0002: bps = 4800; break;
+                case 0x0001: bps = 2400; break;
+                case 0x0000: bps = 1200; break;
+                default:
+                    printf("Unknown raw baud rate value: 0x%04X\n", bps_raw);
+                    return -1;
+            }
+
+            switch (bps) {
+                case 1200:
+                case 2400:
+                case 4800:
+                case 9600:
+                case 14400:
+                case 19200:
+                case 38400:
+                case 56000:
+                case 57600:
+                case 115200:
+                    printf("Current baud rate: %u bps\n", bps);
+                    return bps;
+                default:
+                    printf("Unknown baud rate value: %u\n", bps);
+                    return -1;
+            }
+        } else {
+            printf("CRC 실패 - Device: %d, Received: %04X, Calculated: %04X\n", 
+                   device_addr, receivedCRC, calculatedCRC);
+            return -1;
+        }
+    }
+    printf("잘못된 응답 형식\n");
+    return -1;
+}
+
+// 보드레이트 읽기 함수
+int readBaudRate(uint8_t device_addr, bool debug_print) {
+    if (uart_fd < 0 || device_addr > 0x7F) {
+        if (debug_print) printf("잘못된 매개변수 또는 UART가 초기화되지 않음\n");
+        return -1;
+    }
+
+    uint8_t cmd[8] = {device_addr, 0x03, 0x00, 0xFE, 0x00, 0x01, 0x00, 0x00};
+    uint16_t crc = CRC16_MODBUS(cmd, 6);
+    cmd[6] = crc & 0xFF;
+    cmd[7] = (crc >> 8) & 0xFF;
+
+    if (debug_print) {
+        printf("보드레이트 읽기 명령 전송 (Device %d): ", device_addr);
+        for (int i = 0; i < 8; i++) {
+            printf("0x%02X ", cmd[i]);
+        }
+        printf("\n");
+    }
+
+    int result = write(uart_fd, cmd, 8);
+    if (result != 8) {
+        if (debug_print) printf("명령 전송 실패: %d 바이트 전송됨, 오류: %s\n", result, strerror(errno));
+        return -1;
+    }
+
+    wait_for_milliseconds(2000.0); // 2초 대기
+
+    uint8_t response[32] = {0};
+    int bytes_read = read(uart_fd, response, sizeof(response));
+    if (bytes_read <= 0) {
+        if (debug_print) printf("응답 읽기 실패: %d 바이트, 오류: %s\n", bytes_read, strerror(errno));
+        return -1;
+    }
+
+    if (debug_print) {
+        printf("수신 데이터: ");
+        for (int i = 0; i < bytes_read; i++) {
+            printf("0x%02X ", response[i]);
+        }
+        printf("\n");
+    }
+
+    int32_t baudrate = parseBaudRateResponse(response, bytes_read, device_addr);
+    if  (baudrate < 0) {
+        if (debug_print) printf("Baudrate 파싱 실패\n");
+        return -1;
+    }
+
+    return baudrate; // 성공 시 Baud Rate 반환
+}
+
+// 스레드 함수
+void* baudrate_thread(void* arg) {
+    uint8_t device_addr = *(uint8_t*)arg;
+    bool debug_print = true;
+
+    while (1) {
+        int baudrate = readBaudRate(device_addr, debug_print);
+        
+        if (baudrate < 0) {
+            printf("데이터 읽기 실패\n");
+        } else {
+            printf("Baud Rate 확인 성공: %d bps\n", baudrate);
+            break; // 성공 시 종료
+        }
+        
+        wait_for_milliseconds(2000.0); // 2초 대기 후 재시도
+    }
+    
+    return NULL;
+}
+
+int main() {
+    if (init_uart("/dev/ttyUSB0") < 0) {
+        return -1;
+    }
+
+    uint8_t device_addr = 1;
+
+    pthread_t thread_id;
+    if (pthread_create(&thread_id, NULL, baudrate_thread, &device_addr) != 0) {
+        printf("스레드 생성 실패\n");
+        close(uart_fd);
+        return -1;
+    }
+
+    pthread_join(thread_id, NULL);
+
+    close(uart_fd);
+    return 0;
+}
