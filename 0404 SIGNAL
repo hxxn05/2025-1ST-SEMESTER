@@ -1,0 +1,317 @@
+#include <cstdio>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <unistd.h>
+#include <fcntl.h>
+#include <termios.h>
+#include <pthread.h>
+#include <errno.h>
+#include <iostream>
+#include <sys/time.h>
+#include <signal.h>
+
+class VoltageController 
+{
+private:
+    int uart_fd;
+    const char* port;
+    uint8_t device_addr;
+
+    struct VoltageHex 
+    {
+        float voltage;
+        uint16_t hex_value;
+    };
+    static const VoltageHex voltage_table[];
+    static const int voltage_table_size;
+
+    uint16_t CRC16_MODBUS(const uint8_t* data, uint16_t length)
+    {
+        uint16_t crc = 0xFFFF;
+        for (uint16_t i = 0; i < length; i++)
+        {
+            crc ^= static_cast<uint16_t>(data[i]);
+            for (uint8_t j = 0; j < 8; j++) 
+            {
+                if (crc & 0x0001) crc = (crc >> 1) ^ 0xA001;
+                else crc >>= 1;
+            }
+        }
+        return crc;
+    }
+
+    void wait_for_milliseconds(float wait_ms)
+    {
+        struct timeval start_time, current_time;
+        float elapsed_ms = 0;
+
+        gettimeofday(&start_time, nullptr);
+        while (elapsed_ms < wait_ms) 
+        {
+            gettimeofday(&current_time, nullptr);
+            elapsed_ms = (current_time.tv_sec - start_time.tv_sec) * 1000.0f +
+                (current_time.tv_usec - start_time.tv_usec) / 1000.0f;
+            usleep(1000);
+        }
+    }
+
+    int init_uart()
+    {
+        uart_fd = open(port, O_RDWR | O_NOCTTY);
+        if (uart_fd < 0)
+        {
+            std::printf("포트 열기 실패: %s\n", std::strerror(errno));
+            return -1;
+        }
+
+        struct termios options;
+        tcgetattr(uart_fd, &options);
+
+        cfsetispeed(&options, B115200);
+        cfsetospeed(&options, B115200);
+
+        options.c_cflag = (options.c_cflag & ~CSIZE) | CS8;
+        options.c_cflag &= ~PARENB;
+        options.c_cflag &= ~CSTOPB;
+        options.c_cflag |= CLOCAL | CREAD;
+        options.c_iflag = 0;
+        options.c_oflag = 0;
+        options.c_lflag = 0;
+
+        options.c_cc[VTIME] = 20;
+        options.c_cc[VMIN] = 0;
+
+        tcflush(uart_fd, TCIFLUSH);
+        if (tcsetattr(uart_fd, TCSANOW, &options) != 0)
+        {
+            std::printf("설정 적용 안 됨: %s\n", std::strerror(errno));
+            close(uart_fd);
+            return -1;
+        }
+
+        return 0;
+    }
+
+    uint16_t voltageToHex(float voltage)
+    {
+        for (int i = 0; i < voltage_table_size; i++)
+        {
+            if (std::abs(voltage_table[i].voltage - voltage) < 0.01) 
+            {
+                return voltage_table[i].hex_value;
+            }
+        }
+        std::printf("지원되지 않는 전압 값: %.1fV (범위: -10.4V ~ +10.4V)\n", voltage);
+        return 0x0800;
+    }
+
+    float hexToVoltage(uint16_t hex_value)
+    {
+        for (int i = 0; i < voltage_table_size; i++)
+        {
+            if (voltage_table[i].hex_value == hex_value)
+            {
+                return voltage_table[i].voltage;
+            }
+        }
+        std::printf("알 수 없는 HEX 값: %04X\n", hex_value);
+        return 0.0;
+    }
+
+    bool setVoltage(float voltage, bool debug_print) 
+    {
+        if (uart_fd < 0 || device_addr > 0x7F)
+        {
+            if (debug_print) std::printf("포트 문제 있음\n");
+            return false;
+        }
+
+        uint16_t hex_value = voltageToHex(voltage);
+        uint8_t cmd[11];
+        std::memset(cmd, 0, sizeof(cmd));
+        cmd[0] = device_addr;         // Slave Address
+        cmd[1] = 0x10;                // Function Code (Preset Multiple Registers)
+        cmd[2] = 0x05;                // Starting Address Hi (0x0500 for Channel 1)
+        cmd[3] = 0x00;                // Starting Address Lo
+        cmd[4] = 0x00;                // No. of Registers Hi
+        cmd[5] = 0x01;                // No. of Registers Lo (1 register)
+        cmd[6] = 0x02;                // Byte Count (2 bytes)
+        cmd[7] = (hex_value >> 8) & 0xFF; // Data Hi
+        cmd[8] = hex_value & 0xFF;    // Data Lo
+        uint16_t crc = CRC16_MODBUS(cmd, 9);
+        cmd[9] = crc & 0xFF;          // CRC Lo
+        cmd[10] = (crc >> 8) & 0xFF;  // CRC Hi
+
+        if (debug_print) 
+        {
+            std::printf("==== 전압 설정 명령 입력값: (-10.4V ~ +10.4V): %.1f ====\n", voltage);
+            std::printf("전압 설정 명령 (HEX): ");
+            for (int i = 0; i < 11; i++) std::printf("%02X ", cmd[i]);
+            std::printf("\n");
+            std::printf("전압 설정 명령 (Raw): ");
+            for (int i = 0; i < 8; i++) std::printf("%02X ", cmd[i]);
+            std::printf("\n");
+            std::printf("설정 레지스터 주소: 0x%02X\n", cmd[1]);
+            std::printf("시작 주소: 0x%02X%02X\n", cmd[2], cmd[3]);
+            std::printf("바이어스 스위치: 1\n");
+        }
+
+        int result = write(uart_fd, cmd, 11);
+        if (result != 11)
+        {
+            if (debug_print) std::printf("전송 실패: %d 바이트 보냄, 오류: %s\n", result, std::strerror(errno));
+            return false;
+        }
+
+        wait_for_milliseconds(200.0);
+
+        uint8_t response[8] = { 0 };
+        int bytes_read = read(uart_fd, response, sizeof(response));
+        if (bytes_read <= 0)
+        {
+            if (debug_print) std::printf("응답 못 받음: %d 바이트, 오류: %s\n", bytes_read, std::strerror(errno));
+            return false;
+        }
+
+        if (debug_print)
+        {
+            std::printf("==== 응답 전압 ====\n");
+            std::printf("응답 전압 (HEX): ");
+            for (int i = 0; i < bytes_read; i++) std::printf("%02X ", response[i]);
+            std::printf("\n");
+            std::printf("응답 전압 (Raw): ");
+            for (int i = 0; i < 6; i++) std::printf("%02X ", response[i]);
+            std::printf("\n");
+            std::printf("바이어스: 0x%X\n", response[5]);
+            std::printf("바이어스 HEX 값: 0x%04X\n", hex_value);
+            std::printf("바이어스 전압: %.1f V\n", voltage);
+            std::printf("==== 전압 설정 완료 ====\n");
+        }
+
+        if (bytes_read >= 6 && response[0] == device_addr && response[1] == 0x10 &&
+            response[2] == 0x05 && response[3] == 0x00 && response[4] == 0x00 && response[5] == 0x01) 
+        {
+            uint16_t receivedCRC = (response[7] << 8) | response[6];
+            uint16_t calculatedCRC = CRC16_MODBUS(response, 6);
+            if (receivedCRC != calculatedCRC) {
+                if (debug_print) std::printf("CRC 오류 - 받은 값: %04X, 계산 값: %04X\n", receivedCRC, calculatedCRC);
+                return false;
+            }
+        }
+        else
+        {
+            if (debug_print) std::printf("응답 형식 오류\n");
+            return false;
+        }
+        return true;
+    }
+
+public:
+    VoltageController(const char* serial_port, uint8_t addr) : port(serial_port), device_addr(addr), uart_fd(-1)
+    {
+        if (init_uart() < 0) throw std::runtime_error("포트 초기화 실패");
+    }
+
+    ~VoltageController()
+    {
+        if (uart_fd >= 0)
+        {
+            close(uart_fd);
+            std::printf("시리얼 포트 닫힘\n");
+        }
+    }
+
+    void run()
+    {
+        bool debug_print = true;
+        float voltage;
+
+        while (true)
+        {
+            std::printf("설정할 전압 값을 입력하세요 (-10.4V ~ +10.4V, 종료하려면 'q'): ");
+            std::string input;
+            std::getline(std::cin, input);
+
+            if (input == "q" || input == "Q")
+            {
+                std::printf("프로그램 종료\n");
+                break;
+            }
+
+            try 
+            {
+                voltage = std::stof(input);
+                if (voltage < -10.4 || voltage > 10.4) 
+                {
+                    std::printf("전압 범위를 벗어났습니다 (-10.4V ~ +10.4V)\n");
+                    continue;
+                }
+
+                if (setVoltage(voltage, debug_print)) 
+                {
+                    // 성공 메시지는 이미 setVoltage에서 출력됨
+                }
+                else
+                {
+                    std::printf("전압 설정 실패: %.1fV\n", voltage);
+                }
+            }
+            catch (const std::exception& e)
+            {
+                std::printf("잘못된 입력입니다: %s\n", e.what());
+            }
+
+            wait_for_milliseconds(1000.0);
+        }
+    }
+
+    void cleanup()
+    {
+        if (uart_fd >= 0) 
+        {
+            close(uart_fd);
+            std::printf("시리얼 포트 닫힘\n");
+            uart_fd = -1;
+        }
+    }
+};
+
+static VoltageController* controller_instance = nullptr;
+
+void sigint_handler(int sig)
+{
+    std::printf("SIGINT 신호를 받았습니다!\n");
+    if (controller_instance != nullptr)
+    {
+        controller_instance->cleanup();
+    }
+    exit(0);
+}
+
+const VoltageController::VoltageHex VoltageController::voltage_table[] = 
+{
+    {-10.4, 0x0FFF}, {-10.0, 0x0FB0}, {-9.0, 0x0EEB}, {-8.0, 0x0E26}, {-7.0, 0x0D61},
+    {-6.0, 0x0C9C}, {-5.0, 0x0BD8}, {-4.0, 0x0B13}, {-3.0, 0x0A4E}, {-2.0, 0x0989},
+    {-1.0, 0x08C4}, {0.0, 0x0800}, {0.0, 0x0000}, {1.0, 0x00C5}, {2.0, 0x018A},
+    {3.0, 0x024F}, {4.0, 0x0314}, {5.0, 0x03D9}, {6.0, 0x049E}, {7.0, 0x0562},
+    {8.0, 0x0627}, {9.0, 0x06EC}, {10.0, 0x07B1}, {10.4, 0x07FF}
+};
+const int VoltageController::voltage_table_size = sizeof(voltage_table) / sizeof(voltage_table[0]);
+
+int main()
+{
+    try 
+    {
+        VoltageController controller("/dev/ttyUSB0", 1);
+        controller_instance = &controller;
+        signal(SIGINT, sigint_handler);
+        controller.run();
+    }
+    catch (const std::exception& e) 
+    {
+        std::printf("문제 생김: %s\n", e.what());
+        return -1;
+    }
+    return 0;
+}
